@@ -142,7 +142,6 @@ export default function Dashboard() {
   }
 
   const maxScore     = Math.max(...scores.map(s=>s.score), 1);
-  const maxTplSent   = Math.max(...templates.map(t=>Number(t.sent)), 1);
   const funnelColors = ["#1B2C6B","#2563EB","#059669","#D97706"];
   const stepLabels   = ["Initial email","Follow-up 1","Follow-up 2","Final follow-up"];
 

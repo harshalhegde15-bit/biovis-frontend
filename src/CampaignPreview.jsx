@@ -9,7 +9,6 @@ import {
 import {
   getSequenceForLead,
   getStepDefinition,
-  getSequenceList,
 } from "./sequences";
 
 // ─────────────────────────────────────────────
