@@ -207,27 +207,6 @@ compliance | high-resolution imaging | regulatory-ready reporting
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
   },
 
-  // ── Generic / All Products Exhibition Intro ───────────────────────────────────
-   biovis_all: {
-    displayName: "Biovis® Exhibition Intro",
-    subject: (firstName, company) =>
-      `Biovis® Advanced Image Analysis Instruments — Introduction for ${company || "Your Organisation"}`,
-    intro: (firstName, company, sectorContext) =>
-      `I am writing from Expert Vision Labs Pvt. Ltd. thankyou for visting our stall and I like to introduce our Biovis® range of advanced image analysis-based scientific instruments — covering particle characterization, filter particle analysis, micro-particle detection, cell imaging, and contamination identification. Our solutions are actively deployed in ${sectorContext} to bring accuracy, automation, and regulatory compliance to analytical workflows.`,
-    productBlock: `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Biovis® Product Range — Overview
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-• Biovis® PSA 2000 — Particle Size, Shape & Colour Analyzer
-• Biovis® FPS — Filter/Fiber Particle System (USP <788>, <789>)
-• Biovis® IP — Image-Based Particle Identification Platform
-• Biovis® Cell Analysis Suite — Automated Cell Counting & Viability
-• Biovis ALM - Automated Detection of SEM/TEM Images
-• Backpack Based Portable Freezer for cold chain Sample Transportation 
-All instruments feature: AI-assisted classification | 21 CFR Part 11
-compliance | high-resolution imaging | regulatory-ready reporting
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-  },
-
 };
 
 // ─────────────────────────────────────────────
