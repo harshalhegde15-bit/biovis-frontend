@@ -1,1 +1,0 @@
-# biovis-frontend
