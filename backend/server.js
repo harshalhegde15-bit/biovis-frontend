@@ -53,7 +53,7 @@ const corsOptions = {
 app.use(cors(corsOptions));
 
 // Handle preflight OPTIONS requests for ALL routes explicitly
-app.options("*", cors(corsOptions));
+app.options("/(.*)", cors(corsOptions));
 
 // ─────────────────────────────────────────────
 // SECURITY MIDDLEWARE — after CORS
