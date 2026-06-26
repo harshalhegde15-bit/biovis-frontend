@@ -1,6 +1,6 @@
 // ============================================================
 // server.js — Biovis Campaign Backend — PRODUCTION READY
-// Resend email provider (replaced Gmail/Nodemailer)
+// Resend email provider + CORS hardened
 // Expert Vision Labs Pvt. Ltd.
 // ============================================================
 require("dotenv").config();
@@ -29,20 +29,40 @@ if (missing.length > 0) {
 }
 
 // ─────────────────────────────────────────────
-// SECURITY MIDDLEWARE
+// CORS — MUST BE FIRST before helmet and everything else
+// This is the #1 fix — cors() must come before helmet()
+// ─────────────────────────────────────────────
+const corsOptions = {
+  origin: function (origin, callback) {
+    // Allow all origins — including Vercel preview URLs
+    callback(null, true);
+  },
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "X-Requested-With",
+    "Accept",
+    "Origin",
+  ],
+  credentials: true,
+  optionsSuccessStatus: 200, // fixes preflight issues on older browsers
+};
+
+// Apply CORS before everything else
+app.use(cors(corsOptions));
+
+// Handle preflight OPTIONS requests for ALL routes explicitly
+app.options("*", cors(corsOptions));
+
+// ─────────────────────────────────────────────
+// SECURITY MIDDLEWARE — after CORS
 // ─────────────────────────────────────────────
 app.use(
   helmet({
     contentSecurityPolicy: false,
-  })
-);
-
-// ─────────────────────────────────────────────
-// CORS — allow all origins (debugging)
-// ─────────────────────────────────────────────
-app.use(
-  cors({
-    origin: "*",
+    crossOriginResourcePolicy: false, // prevents helmet blocking cross-origin requests
+    crossOriginOpenerPolicy: false,   // prevents helmet breaking CORS headers
   })
 );
 
@@ -127,20 +147,20 @@ app.get("/ping", async (req, res) => {
   try {
     const result = await pool.query("SELECT NOW() AS now");
     res.json({
-      status: "healthy",
-      message: "Backend running",
-      db: "PostgreSQL (Supabase) connected",
-      db_time: result.rows[0].now,
-      scheduler: "active",
+      status:         "healthy",
+      message:        "Backend running",
+      db:             "PostgreSQL (Supabase) connected",
+      db_time:        result.rows[0].now,
+      scheduler:      "active",
       uptime_seconds: Math.floor(process.uptime()),
-      env: process.env.NODE_ENV || "development",
+      env:            process.env.NODE_ENV || "development",
     });
   } catch (err) {
     logger.error("Health check DB failure", err);
     res.status(503).json({
-      status: "unhealthy",
+      status:  "unhealthy",
       message: "Backend running but DB error",
-      error: err.message,
+      error:   err.message,
     });
   }
 });
@@ -153,13 +173,11 @@ app.get("/health/deep", async (req, res) => {
   } catch (err) {
     logger.error("DB health check failed", err);
   }
-
   try {
     checks.email = !!process.env.RESEND_API_KEY;
   } catch (err) {
     logger.error("Email health check failed", err);
   }
-
   const allHealthy = Object.values(checks).every(Boolean);
   res
     .status(allHealthy ? 200 : 503)
@@ -199,10 +217,7 @@ app.post("/api/contacts/bulk", bulkImportLimiter, async (req, res, next) => {
   let inserted = 0, updated = 0, skipped = 0;
   try {
     for (const c of contacts) {
-      if (!c.email || !c.email.includes("@")) {
-        skipped++;
-        continue;
-      }
+      if (!c.email || !c.email.includes("@")) { skipped++; continue; }
       const leadId =
         c.leadId ||
         c.id ||
@@ -258,7 +273,7 @@ app.get("/api/contacts/:leadId/history", async (req, res, next) => {
 });
 
 // ─────────────────────────────────────────────
-// SEND EMAIL — now using Resend
+// SEND EMAIL — Resend
 // ─────────────────────────────────────────────
 app.post("/send-email", sendEmailLimiter, async (req, res, next) => {
   const {
@@ -315,7 +330,6 @@ app.post("/send-email", sendEmailLimiter, async (req, res, next) => {
     } catch (dbErr) {
       logger.error("DB log error after send failure", dbErr);
     }
-
     logger.error("Email send failed", err, { to, templateId });
     return res.status(500).json({ success: false, error: err.message });
   }
@@ -327,7 +341,8 @@ app.post("/send-email", sendEmailLimiter, async (req, res, next) => {
 app.get("/api/sequences", async (req, res, next) => {
   try {
     const r = await pool.query(`
-      SELECT ls.*, (SELECT COUNT(*) FROM sent_emails se WHERE se.lead_id=ls.lead_id) AS total_emails_sent
+      SELECT ls.*,
+        (SELECT COUNT(*) FROM sent_emails se WHERE se.lead_id=ls.lead_id) AS total_emails_sent
       FROM lead_sequences ls ORDER BY ls.updated_at DESC
     `);
     res.json(r.rows);
@@ -384,7 +399,8 @@ app.post("/api/sequences/:leadId/replied", async (req, res, next) => {
       [req.params.leadId]
     );
     await pool.query(
-      `UPDATE sent_emails SET replied=TRUE WHERE lead_id=$1 AND id=(SELECT id FROM sent_emails WHERE lead_id=$1 ORDER BY sent_at DESC LIMIT 1)`,
+      `UPDATE sent_emails SET replied=TRUE WHERE lead_id=$1
+       AND id=(SELECT id FROM sent_emails WHERE lead_id=$1 ORDER BY sent_at DESC LIMIT 1)`,
       [req.params.leadId]
     );
     logger.info("Lead marked as replied", { leadId: req.params.leadId });
@@ -412,14 +428,14 @@ app.get("/api/stats/summary", async (req, res, next) => {
         pool.query(`SELECT COUNT(*) AS c FROM lead_scores WHERE replied=TRUE`),
       ]);
     res.json({
-      sent_last_n_days:     Number(sent.rows[0].c),
-      errors_last_n_days:   Number(errors.rows[0].c),
-      sent_all_time:        Number(allTime.rows[0].c),
-      sent_today:           Number(today.rows[0].c),
-      active_sequences:     Number(activeSeq.rows[0].c),
-      completed_sequences:  Number(completedSeq.rows[0].c),
-      total_contacts:       Number(totalContacts.rows[0].c),
-      replied_leads:        Number(replied.rows[0].c),
+      sent_last_n_days:    Number(sent.rows[0].c),
+      errors_last_n_days:  Number(errors.rows[0].c),
+      sent_all_time:       Number(allTime.rows[0].c),
+      sent_today:          Number(today.rows[0].c),
+      active_sequences:    Number(activeSeq.rows[0].c),
+      completed_sequences: Number(completedSeq.rows[0].c),
+      total_contacts:      Number(totalContacts.rows[0].c),
+      replied_leads:       Number(replied.rows[0].c),
       days,
     });
   } catch (err) {
@@ -448,7 +464,7 @@ app.get("/api/stats/sectors", async (req, res, next) => {
               COUNT(*) FILTER (WHERE status='sent')  AS sent,
               COUNT(*) FILTER (WHERE status='error') AS errors
        FROM sent_emails
-       WHERE sector IS NOT NULL AND sector<>''
+       WHERE sector IS NOT NULL AND sector <> ''
        GROUP BY sector ORDER BY sent DESC`
     );
     res.json(r.rows);
