@@ -293,7 +293,7 @@ app.post("/send-email", sendEmailLimiter, async (req, res, next) => {
 
   try {
     const { data, error } = await resend.emails.send({
-      from:     "Harshal Hegde | Expert Vision Labs <onboarding@resend.dev>",
+      from:     "Harshal Hegde | Expert Vision Labs <harshalhegde@expertvisionlabs.com>",
       to:       [to],
       subject:  subject,
       html:     body,
