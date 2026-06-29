@@ -18,6 +18,7 @@ const MAX_BATCH_SIZE  = 50;
 const SEND_DELAY_MS   = 1200;
 const BACKEND_URL     = process.env.REACT_APP_BACKEND_URL || "http://localhost:5000";
 const EMAIL_TEMPLATES = getProductTemplateList();
+const POLL_INTERVAL   = 3000; // poll batch status every 3s
 
 // ─────────────────────────────────────────────
 // HEADER MAP BUILDER
@@ -142,8 +143,8 @@ export default function CampaignPreview() {
   const navigate = useNavigate();
 
   // ── Core state ────────────────────────────────────────────────
-  const [contacts, setContacts]               = useState([]);  // loaded from DB
-  const [localStatus, setLocalStatus]         = useState({});  // leadId → status (optimistic UI)
+  const [contacts, setContacts]               = useState([]);
+  const [localStatus, setLocalStatus]         = useState({});
   const [loading, setLoading]                 = useState(true);
   const [importing, setImporting]             = useState(false);
   const [importResult, setImportResult]       = useState(null);
@@ -152,12 +153,14 @@ export default function CampaignPreview() {
   const [draft, setDraft]                     = useState(null);
   const [sending, setSending]                 = useState(false);
   const [batchRunning, setBatchRunning]       = useState(false);
-  const [batchProgress, setBatchProgress]     = useState({ done: 0, total: 0 });
+  const [batchProgress, setBatchProgress]     = useState({ sent: 0, failed: 0, total: 0 });
   const [batchLog, setBatchLog]               = useState([]);
+  const [batchStatus, setBatchStatus]         = useState(""); // "running" | "completed" | "failed"
   const [selectedTemplates, setSelectedTemplates] = useState({});
   const [searchTerm, setSearchTerm]           = useState("");
   const [filterSector, setFilterSector]       = useState("All");
-  const cancelRef                             = useRef(false);
+  const pollRef                               = useRef(null);
+  const batchIdRef                            = useRef(null);
 
   // ── Load contacts from DB on mount ───────────────────────────
   const loadContacts = useCallback(async () => {
@@ -167,7 +170,6 @@ export default function CampaignPreview() {
       const data = await res.json();
       if (Array.isArray(data)) {
         setContacts(data);
-        // Sync local status from DB
         const statusMap = {};
         data.forEach((c) => {
           if (c.last_status === "sent" && c.current_step > 1) statusMap[c.lead_id] = "follow-up";
@@ -185,6 +187,11 @@ export default function CampaignPreview() {
 
   useEffect(() => { loadContacts(); }, [loadContacts]);
 
+  // ── Cleanup poll on unmount ───────────────────────────────────
+  useEffect(() => {
+    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+  }, []);
+
   // ── Helpers ───────────────────────────────────────────────────
   function setStatus(leadId, status) {
     setLocalStatus((p) => ({ ...p, [leadId]: status }));
@@ -195,7 +202,44 @@ export default function CampaignPreview() {
     setBatchLog((l) => [...l, { time, msg, type }]);
   }
 
-  // ── Excel file handler → parse + save to DB ───────────────────
+  // ── Poll batch status ─────────────────────────────────────────
+  function startPolling(batchId) {
+    batchIdRef.current = batchId;
+    if (pollRef.current) clearInterval(pollRef.current);
+
+    pollRef.current = setInterval(async () => {
+      try {
+        const res  = await fetch(`${BACKEND_URL}/api/batches/${batchId}`);
+        const data = await res.json();
+
+        if (data.error) {
+          addLog(`Poll error: ${data.error}`, "error");
+          return;
+        }
+
+        const { sent = 0, failed = 0, total = 0, status } = data;
+        setBatchProgress({ sent, failed, total });
+        setBatchStatus(status);
+        addLog(`Progress: ${sent} sent, ${failed} failed of ${total}`, "info");
+
+        if (status === "completed" || status === "failed" || sent + failed >= total) {
+          clearInterval(pollRef.current);
+          pollRef.current = null;
+          setBatchRunning(false);
+          setBatchStatus(status);
+          addLog(
+            `Batch ${status} — ${sent} sent, ${failed} failed.`,
+            failed > 0 ? "error" : "success"
+          );
+          await loadContacts();
+        }
+      } catch (err) {
+        addLog(`Poll error: ${err.message}`, "error");
+      }
+    }, POLL_INTERVAL);
+  }
+
+  // ── Excel file handler ────────────────────────────────────────
   const handleFile = async (file) => {
     setError("");
     setImportResult(null);
@@ -217,7 +261,6 @@ export default function CampaignPreview() {
         const map = buildHeaderMap(rows[0]);
         setHeaderMap(map);
 
-        // Map Excel rows to contact objects
         const mapped = rows
           .map((row) => {
             const personName = (map.personNameHeader && row[map.personNameHeader]) || "";
@@ -230,15 +273,7 @@ export default function CampaignPreview() {
             let sector            = (map.sectorHeader && row[map.sectorHeader]) || "";
             if (!sector) sector   = guessSectorFromCompany(company);
 
-            return {
-              leadId: makeLeadId(email),
-              personName,
-              email:  email.trim(),
-              company,
-              phone,
-              sector,
-              productInterest,
-            };
+            return { leadId: makeLeadId(email), personName, email: email.trim(), company, phone, sector, productInterest };
           })
           .filter(Boolean);
 
@@ -248,8 +283,7 @@ export default function CampaignPreview() {
           return;
         }
 
-        // Save to PostgreSQL
-        const res  = await fetch(`${BACKEND_URL}/api/contacts/bulk`, {
+        const res    = await fetch(`${BACKEND_URL}/api/contacts/bulk`, {
           method:  "POST",
           headers: { "Content-Type": "application/json" },
           body:    JSON.stringify({ contacts: mapped, sourceFile: file.name }),
@@ -260,7 +294,6 @@ export default function CampaignPreview() {
           setError("Import failed: " + result.error);
         } else {
           setImportResult(result);
-          // Reload contacts from DB so table shows fresh data with DB ids
           await loadContacts();
         }
       } catch (err) {
@@ -272,7 +305,7 @@ export default function CampaignPreview() {
     reader.readAsArrayBuffer(file);
   };
 
-  // ── Core send function ────────────────────────────────────────
+  // ── Core send function (single email) ────────────────────────
   async function sendEmail({ to, subject, body, leadId, lead, templateId, sequenceStep, isFollowUp }) {
     const sequence = lead ? getSequenceForLead(lead) : { id: "default" };
     const res = await fetch(`${BACKEND_URL}/send-email`, {
@@ -301,7 +334,6 @@ export default function CampaignPreview() {
       if (data.success) {
         setStatus(draftObj.leadId, draftObj.isFollowUp ? "follow-up" : "sent");
         setDraft(null);
-        // Refresh contacts to get updated sequence state from DB
         await loadContacts();
         alert(`Email sent to ${draftObj.to}`);
       } else {
@@ -331,8 +363,7 @@ export default function CampaignPreview() {
 
   // ── Pause / Resume sequence ───────────────────────────────────
   async function togglePause(lead) {
-    const isPaused = lead.paused;
-    const action   = isPaused ? "resume" : "pause";
+    const action = lead.paused ? "resume" : "pause";
     try {
       await fetch(`${BACKEND_URL}/api/sequences/${lead.lead_id}/${action}`, { method: "POST" });
       await loadContacts();
@@ -348,7 +379,7 @@ export default function CampaignPreview() {
     } catch (err) { alert("Delete failed: " + err.message); }
   }
 
-  // ── Send All ──────────────────────────────────────────────────
+  // ── Send All — now uses batch API + worker ────────────────────
   async function sendAll() {
     const pending = filteredContacts.filter(
       (c) => !["sent", "follow-up"].includes(localStatus[c.lead_id] || c.last_status)
@@ -359,74 +390,67 @@ export default function CampaignPreview() {
     const skipped = pending.length - batch.length;
 
     if (!window.confirm(
-      `Send initial emails to ${batch.length} contact(s)?` +
+      `Queue ${batch.length} email(s) for sending via background worker?` +
       (skipped > 0 ? `\n\n${skipped} over batch cap — will send next run.` : "")
     )) return;
 
-    setBatchRunning(true);
-    cancelRef.current = false;
-    setBatchProgress({ done: 0, total: batch.length });
-    setBatchLog([]);
-    addLog(`Batch started — ${batch.length} contacts · ${SEND_DELAY_MS}ms delay`, "info");
-
-    let successCount = 0, errorCount = 0;
-
-    for (let i = 0; i < batch.length; i++) {
-      if (cancelRef.current) { addLog("Batch cancelled.", "warning"); break; }
-
-      const lead       = batch[i];
-      const leadId     = lead.lead_id;
-      const templateId = selectedTemplates[leadId] || "biovis_psa";
-      const sequence   = getSequenceForLead(lead);
+    // Build contacts payload for the batch API
+    const contactsPayload = batch.map((lead) => {
+      const leadObj    = { ...lead, personName: lead.person_name, name: lead.person_name };
+      const templateId = selectedTemplates[lead.lead_id] || "biovis_psa";
+      const sequence   = getSequenceForLead(leadObj);
       const step1Def   = getStepDefinition(sequence, 1);
-      const effectiveTpl = step1Def?.templateId || templateId;
-
-      // Build lead object that matches what BiovisOutreachAgent expects
-      const leadObj = {
-        ...lead,
-        personName: lead.person_name,
-        name:       lead.person_name,
-        sector:     lead.sector,
-        company:    lead.company,
+      return {
+        contact_id:   lead.lead_id,
+        email:        lead.email,
+        template_key: step1Def?.templateId || templateId,
+        step:         1,
       };
+    });
 
-      const d = buildEmailDraftFromLead(leadObj, effectiveTpl);
-      setStatus(leadId, "sending");
-      addLog(`[${i+1}/${batch.length}] → ${lead.person_name} <${lead.email}> · ${effectiveTpl}`, "info");
+    setBatchRunning(true);
+    setBatchProgress({ sent: 0, failed: 0, total: batch.length });
+    setBatchLog([]);
+    setBatchStatus("running");
+    addLog(`Queuing ${batch.length} contacts via batch API…`, "info");
 
-      try {
-        const data = await sendEmail({
-          ...d, leadId, lead: leadObj,
-          templateId: effectiveTpl, sequenceStep: 1, isFollowUp: false,
-        });
-        if (data.success) {
-          setStatus(leadId, "sent");
-          successCount++;
-          addLog(`✓ Sent to ${lead.person_name || lead.email}`, "success");
-        } else {
-          setStatus(leadId, "error");
-          errorCount++;
-          addLog(`✗ Failed — ${lead.person_name}: ${data.error || "unknown"}`, "error");
-        }
-      } catch (err) {
-        setStatus(leadId, "error");
-        errorCount++;
-        addLog(`✗ Error — ${lead.email}: ${err.message}`, "error");
+    try {
+      const res  = await fetch(`${BACKEND_URL}/api/batches`, {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ contacts: contactsPayload }),
+      });
+      const data = await res.json();
+
+      if (data.error || !data.batchId) {
+        addLog(`Failed to create batch: ${data.error || "no batchId returned"}`, "error");
+        setBatchRunning(false);
+        setBatchStatus("failed");
+        return;
       }
 
-      setBatchProgress({ done: i + 1, total: batch.length });
-      if (i < batch.length - 1 && !cancelRef.current) await delay(SEND_DELAY_MS);
-    }
+      addLog(`Batch created — ID: ${data.batchId} · ${data.total} jobs queued`, "success");
+      addLog("Worker is processing… polling every 3s", "info");
+      startPolling(data.batchId);
 
-    addLog(`Complete — ${successCount} sent, ${errorCount} errors.`,
-      successCount > 0 ? "success" : "error");
+    } catch (err) {
+      addLog(`Batch API error: ${err.message}`, "error");
+      setBatchRunning(false);
+      setBatchStatus("failed");
+    }
+  }
+
+  // ── Cancel batch polling ──────────────────────────────────────
+  function cancelBatch() {
+    if (pollRef.current) clearInterval(pollRef.current);
+    pollRef.current = null;
     setBatchRunning(false);
-    // Refresh contacts to sync DB status
-    await loadContacts();
+    setBatchStatus("");
+    addLog("Polling cancelled by user. Jobs may still be processing in worker.", "warning");
   }
 
   // ── Filtering ─────────────────────────────────────────────────
-  const sectors        = ["All", ...new Set(contacts.map((c) => c.sector).filter(Boolean))];
+  const sectors          = ["All", ...new Set(contacts.map((c) => c.sector).filter(Boolean))];
   const filteredContacts = contacts.filter((c) => {
     const matchSector = filterSector === "All" || c.sector === filterSector;
     const matchSearch = !searchTerm ||
@@ -440,10 +464,12 @@ export default function CampaignPreview() {
   const sentCount    = contacts.filter((c) => (localStatus[c.lead_id] || c.last_status) === "sent").length;
   const errorCount   = contacts.filter((c) => (localStatus[c.lead_id] || c.last_status) === "error").length;
   const pendingCount = filteredContacts.filter(
-    (c) => !["sent","follow-up"].includes(localStatus[c.lead_id] || c.last_status)
+    (c) => !["sent", "follow-up"].includes(localStatus[c.lead_id] || c.last_status)
   ).length;
-  const batchPct = batchProgress.total > 0
-    ? Math.round((batchProgress.done / batchProgress.total) * 100) : 0;
+
+  const totalProgress = batchProgress.total || 1;
+  const sentPct       = Math.round((batchProgress.sent  / totalProgress) * 100);
+  const failPct       = Math.round((batchProgress.failed / totalProgress) * 100);
 
   // ─────────────────────────────────────────────
   // RENDER
@@ -559,27 +585,40 @@ export default function CampaignPreview() {
               <button onClick={sendAll} disabled={batchRunning || pendingCount === 0}
                 style={{ padding: "7px 18px", borderRadius: 8, background: batchRunning || pendingCount === 0 ? "#9CA3AF" : "#1B2C6B", color: "#fff", border: "none", fontWeight: 600, fontSize: 12, cursor: batchRunning || pendingCount === 0 ? "not-allowed" : "pointer" }}>
                 {batchRunning
-                  ? `Sending… (${batchProgress.done}/${batchProgress.total})`
+                  ? `Worker sending… (${batchProgress.sent}/${batchProgress.total})`
                   : `▶ Send All Pending (${Math.min(pendingCount, MAX_BATCH_SIZE)})`}
               </button>
               {batchRunning && (
-                <button onClick={() => { cancelRef.current = true; }}
+                <button onClick={cancelBatch}
                   style={{ padding: "7px 14px", borderRadius: 8, background: "#FEF2F2", color: "#DC2626", border: "1px solid #FECACA", fontWeight: 600, fontSize: 12, cursor: "pointer" }}>
-                  ✕ Cancel
+                  ✕ Stop polling
                 </button>
               )}
               <span style={{ fontSize: 11, color: "#6B7280" }}>
                 {sentCount} sent · {errorCount} errors · {pendingCount} pending
                 {pendingCount > MAX_BATCH_SIZE && ` · capped at ${MAX_BATCH_SIZE}`}
               </span>
+              {batchStatus === "completed" && (
+                <span style={{ fontSize: 11, fontWeight: 600, color: "#059669" }}>✓ Batch complete</span>
+              )}
             </div>
 
-            {batchRunning && (
-              <div style={{ background: "#E5E7EB", borderRadius: 4, height: 6, marginBottom: 8 }}>
-                <div style={{ background: "#1B2C6B", borderRadius: 4, height: 6, width: `${batchPct}%`, transition: "width .3s" }} />
+            {/* Progress bar — segmented: green = sent, red = failed, gray = remaining */}
+            {(batchRunning || batchStatus === "completed") && batchProgress.total > 0 && (
+              <div style={{ marginBottom: 8 }}>
+                <div style={{ background: "#E5E7EB", borderRadius: 6, height: 8, overflow: "hidden", display: "flex" }}>
+                  <div style={{ background: "#059669", height: 8, width: `${sentPct}%`, transition: "width .4s" }} />
+                  <div style={{ background: "#DC2626", height: 8, width: `${failPct}%`, transition: "width .4s" }} />
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "#6B7280", marginTop: 3 }}>
+                  <span style={{ color: "#059669" }}>{batchProgress.sent} sent</span>
+                  <span>{batchProgress.sent + batchProgress.failed} / {batchProgress.total} processed</span>
+                  <span style={{ color: "#DC2626" }}>{batchProgress.failed} failed</span>
+                </div>
               </div>
             )}
 
+            {/* Batch log console */}
             {batchLog.length > 0 && (
               <div style={{ background: "#0F172A", borderRadius: 10, padding: "10px 14px", maxHeight: 130, overflowY: "auto", marginBottom: 8 }}>
                 {batchLog.map((l, i) => (
@@ -621,7 +660,6 @@ export default function CampaignPreview() {
                   const isSent     = status === "sent" || status === "follow-up";
                   const isError    = status === "error";
 
-                  // Build lead object compatible with template builders
                   const leadObj = {
                     ...lead,
                     personName: lead.person_name,
@@ -654,7 +692,6 @@ export default function CampaignPreview() {
 
                       <td style={{ border: "1px solid #E5E7EB", padding: "6px 10px" }}>
                         <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-                          {/* Review & Send */}
                           <button
                             onClick={() => {
                               const d = buildEmailDraftFromLead(leadObj, templateId);
@@ -664,7 +701,6 @@ export default function CampaignPreview() {
                             Review & Send
                           </button>
 
-                          {/* Follow-up */}
                           {isSent && !lead.completed && (
                             <button
                               onClick={() => {
@@ -676,7 +712,6 @@ export default function CampaignPreview() {
                             </button>
                           )}
 
-                          {/* Retry */}
                           {isError && (
                             <button onClick={() => retryLead(leadObj)}
                               style={{ fontSize: 10, padding: "3px 8px", borderRadius: 5, border: "1px solid #FECACA", background: "#FEF2F2", color: "#DC2626", cursor: "pointer", fontWeight: 600 }}>
@@ -684,7 +719,6 @@ export default function CampaignPreview() {
                             </button>
                           )}
 
-                          {/* Pause / Resume */}
                           {lead.current_step > 0 && !lead.completed && (
                             <button onClick={() => togglePause(lead)}
                               style={{ fontSize: 10, padding: "3px 8px", borderRadius: 5, border: `1px solid ${lead.paused ? "#BBF7D0" : "#FDE68A"}`, background: lead.paused ? "#F0FDF4" : "#FFFBEB", color: lead.paused ? "#166534" : "#92400E", cursor: "pointer", fontWeight: 600 }}>
@@ -692,7 +726,6 @@ export default function CampaignPreview() {
                             </button>
                           )}
 
-                          {/* Delete */}
                           <button onClick={() => deleteContact(leadId)}
                             style={{ fontSize: 10, padding: "3px 8px", borderRadius: 5, border: "1px solid #E5E7EB", background: "#F9FAFB", color: "#9CA3AF", cursor: "pointer", fontWeight: 600 }}>
                             ✕
