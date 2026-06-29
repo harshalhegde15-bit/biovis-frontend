@@ -8,7 +8,6 @@ import {
 } from "./agents/BiovisOutreachAgent";
 import {
   getSequenceForLead,
-  getStepDefinition,
 } from "./sequences";
 
 // ─────────────────────────────────────────────
