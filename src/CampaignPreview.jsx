@@ -129,7 +129,6 @@ function SequenceBadge({ lead }) {
   return <span style={{ fontSize: 11, fontWeight: 600, color }}>{label}</span>;
 }
 
-
 function wrapHtml(body) {
   return `<!DOCTYPE html><html><body style="font-family:Arial,sans-serif;line-height:1.6;color:#333;max-width:680px;margin:0 auto;padding:20px"><pre style="white-space:pre-wrap;font-family:inherit;font-size:14px">${body}</pre></body></html>`;
 }
@@ -392,19 +391,8 @@ export default function CampaignPreview() {
       (skipped > 0 ? `\n\n${skipped} over batch cap — will send next run.` : "")
     )) return;
 
-    // Build contacts payload for the batch API
-    const contactsPayload = batch.map((lead) => {
-      const leadObj    = { ...lead, personName: lead.person_name, name: lead.person_name };
-      const templateId = selectedTemplates[lead.lead_id] || "biovis_psa";
-      const sequence   = getSequenceForLead(leadObj);
-      const step1Def   = getStepDefinition(sequence, 1);
-      return {
-        contact_id:   lead.lead_id,
-        email:        lead.email,
-        template_key: step1Def?.templateId || templateId,
-        step:         1,
-      };
-    });
+    // Send just the IDs — backend looks up email/template from DB
+     const contactsPayload = batch.map((lead) => lead.lead_id);
 
     setBatchRunning(true);
     setBatchProgress({ sent: 0, failed: 0, total: batch.length });
@@ -416,7 +404,7 @@ export default function CampaignPreview() {
       const res  = await fetch(`${BACKEND_URL}/api/batches`, {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ contacts: contactsPayload }),
+        body: JSON.stringify({ contactIds: contactsPayload }),
       });
       const data = await res.json();
 
