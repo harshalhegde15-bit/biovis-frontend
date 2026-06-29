@@ -15,7 +15,6 @@ import {
 // CONSTANTS
 // ─────────────────────────────────────────────
 const MAX_BATCH_SIZE  = 50;
-const SEND_DELAY_MS   = 1200;
 const BACKEND_URL     = process.env.REACT_APP_BACKEND_URL || "http://localhost:5000";
 const EMAIL_TEMPLATES = getProductTemplateList();
 const POLL_INTERVAL   = 3000; // poll batch status every 3s
@@ -130,7 +129,6 @@ function SequenceBadge({ lead }) {
   return <span style={{ fontSize: 11, fontWeight: 600, color }}>{label}</span>;
 }
 
-function delay(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
 function wrapHtml(body) {
   return `<!DOCTYPE html><html><body style="font-family:Arial,sans-serif;line-height:1.6;color:#333;max-width:680px;margin:0 auto;padding:20px"><pre style="white-space:pre-wrap;font-family:inherit;font-size:14px">${body}</pre></body></html>`;
