@@ -82,10 +82,18 @@ async function workerLoop() {
     minuteStart = Date.now();
   }
   const slots = RATE_PER_MIN - sentThisMinute;
-  if (slots <= 0) { setTimeout(workerLoop, POLL_MS); return; }
+  if (slots <= 0) {
+    console.log('[worker] rate limit reached, sleeping...');
+    setTimeout(workerLoop, POLL_MS);
+    return;
+  }
 
   const jobs = await claimJobs(Math.min(slots, 10));
-  if (!jobs.length) { setTimeout(workerLoop, POLL_MS); return; }
+  if (!jobs.length) {
+    console.log('[worker] polling... no jobs found');
+    setTimeout(workerLoop, POLL_MS);
+    return;
+  }
 
   for (const job of jobs) {
     await processJob(job);
