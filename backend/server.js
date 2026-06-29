@@ -552,6 +552,50 @@ app.get("/api/stats/sequence-detail", async (req, res, next) => {
   }
 });
 
+app.post('/api/batches', async (req, res) => {
+  const { contactIds } = req.body;
+  if (!Array.isArray(contactIds) || !contactIds.length)
+    return res.status(400).json({ error: 'contactIds array required' });
+
+  const batchId = require('crypto').randomUUID();
+  const contacts = await pool.query(
+    `SELECT c.lead_id, c.email, c.sector,
+            COALESCE(ls.current_step,1) as step,
+            COALESCE(ls.template_id, 'biovis_psa') as template_key
+     FROM contacts c
+     LEFT JOIN lead_sequences ls ON ls.lead_id=c.lead_id
+     WHERE c.lead_id = ANY($1)`,
+    [contactIds]
+  );
+
+  await pool.query(
+    'INSERT INTO email_batches(id,total) VALUES($1,$2)',
+    [batchId, contacts.rows.length]
+  );
+
+  for (const c of contacts.rows) {
+    await pool.query(
+      `INSERT INTO email_jobs(batch_id,contact_id,email,template_key,sector,step)
+       VALUES($1,$2,$3,$4,$5,$6)`,
+      [batchId, c.lead_id, c.email, c.template_key, c.sector, c.step]
+    );
+  }
+
+  res.json({ batchId, total: contacts.rows.length, status: 'running' });
+});
+
+app.get('/api/batches/:id', async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT b.id, b.total, b.sent, b.failed, b.status,
+            COUNT(j.id) FILTER (WHERE j.status='pending') AS pending
+     FROM email_batches b
+     LEFT JOIN email_jobs j ON j.batch_id=b.id
+     WHERE b.id=$1 GROUP BY b.id`,
+    [req.params.id]
+  );
+  if (!rows[0]) return res.status(404).json({ error: 'Not found' });
+  res.json(rows[0]);
+});
 // ─────────────────────────────────────────────
 // 404 + ERROR HANDLING (must be last)
 // ─────────────────────────────────────────────
